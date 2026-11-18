@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Базовое разрешение для любого foreground service (API 28+). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- Android 14+: разрешение, привязанное к типу connectedDevice. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+
+    <!-- Предусловие типа connectedDevice (одно из списка anyOf в AOSP:
+         BLUETOOTH_CONNECT, CHANGE_NETWORK_STATE, CHANGE_WIFI_STATE,
+         CHANGE_WIFI_MULTICAST_STATE, NFC, TRANSMIT_IR).
+         Normal permission — выдаётся при установке. Сам логгер Wi-Fi не трогает. -->
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+
+    <!-- Android 13+: без него FGS работает, но уведомление видно только в Task Manager. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Нужно только механизму B. На Android 14+ по умолчанию НЕ выдано новым установкам
+         (targetSdk >= 33). USE_EXACT_ALARM намеренно не используем: оно предназначено
+         для будильников/календарей и выдаётся при установке, что исказило бы условия. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- ВАЖНО: разрешения WAKE_LOCK здесь НЕТ намеренно. Без него приложение физически
+         не может взять partial wake lock — это проверяемая гарантия методики.
+         Wake lock на время onReceive() будильника держит сама система. -->
+
+    <application
+        android:name=".LoggerApp"
+        android:allowBackup="false"
+        android:icon="@android:drawable/ic_menu_info_details"
+        android:label="Battery Logger">
+
+        <activity
+            android:name=".ui.MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.Light">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".service.LoggerService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <receiver
+            android:name=".schedule.AlarmReceiver"
+            android:exported="false" />
+
+        <!-- Отдача логов через «Поделиться»: только чтение, только по выданному праву на URI. -->
+        <provider
+            android:name=".io.LogFileProvider"
+            android:authorities="${applicationId}.logs"
+            android:exported="false"
+            android:grantUriPermissions="true" />
+    </application>
+</manifest>

@@ -1,0 +1,89 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      # AGP 8.7 и Gradle 9 требуют JDK 17; compileOptions/jvmTarget в app/build.gradle.kts тоже 17.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Также проверяет подлинность gradle/wrapper/gradle-wrapper.jar (validate-wrappers по умолчанию включён).
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-provider: basic
+
+      # В архиве gradlew лежит без бита исполнения.
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK and run unit tests
+        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest
+
+      - name: Check permissions in merged manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Запрещённые разрешения — через пробел.
+          FORBIDDEN_PERMISSIONS="android.permission.INTERNET android.permission.ACCESS_NETWORK_STATE"
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          BUILD_TOOLS="$(ls -d "$SDK"/build-tools/*/ | sort -V | tail -n 1)"
+          AAPT2="${BUILD_TOOLS}aapt2"
+
+          echo "aapt2: $AAPT2"
+          echo "APK:   $APK"
+          test -f "$APK" || { echo "::error::APK не найден: $APK"; exit 1; }
+
+          DUMP="$("$AAPT2" dump permissions "$APK")"
+          echo "---- aapt2 dump permissions ----"
+          echo "$DUMP"
+          echo "--------------------------------"
+
+          # Берём только запрашиваемые разрешения (uses-permission и uses-permission-sdk-23).
+          USED="$(echo "$DUMP" | grep -E '^uses-permission(-sdk-23)?:' \
+                    | grep -oE "name='[^']+'" | sed -E "s/^name='(.*)'$/\1/" | sort -u || true)"
+
+          # Защита от ложного «зелёного»: в приложении точно есть разрешения,
+          # пустой список значит, что формат вывода aapt2 изменился и парсер сломан.
+          if [ -z "$USED" ]; then
+            echo "::error::Не удалось извлечь ни одного uses-permission из APK — проверьте разбор вывода aapt2."
+            exit 1
+          fi
+
+          FOUND=0
+          for p in $FORBIDDEN_PERMISSIONS; do
+            if echo "$USED" | grep -Fxq "$p"; then
+              echo "::error::Запрещённое разрешение в итоговом манифесте: $p"
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK: запрещённых разрешений нет."

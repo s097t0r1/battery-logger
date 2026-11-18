@@ -1,0 +1,37 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# Kotlin
+.kotlin/
+
+# Android Studio / IntelliJ
+.idea/
+*.iml
+.navigation/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Локальные настройки (путь к SDK и т. п.)
+local.properties
+
+# Ключи подписи — никогда не коммитить
+*.jks
+*.keystore
+
+# Собранные файлы
+*.apk
+*.aab
+*.ap_
+*.dex
+output-metadata.json
+
+# Логи и данные, скачанные с телефонов
+*.log
+*.hprof
+
+# Системные файлы
+.DS_Store
+Thumbs.db

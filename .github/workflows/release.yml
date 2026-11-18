@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write       # создание GitHub Release
+  id-token: write       # OIDC-токен для подписи аттестации
+  attestations: write   # публикация аттестации происхождения сборки
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # Для релиза кеш отключён: в релизную сборку не попадает ничего из
+      # прошлых запусков, всё собирается с нуля из кода по тегу.
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: true
+
+      - name: Make gradlew executable
+        run: chmod +x gradlew
+
+      - name: Build debug APK and run unit tests
+        run: ./gradlew --no-daemon assembleDebug testDebugUnitTest
+
+      # Та же проверка, что и в build.yml: релиз с сетевыми разрешениями не публикуется.
+      - name: Check permissions in merged manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Запрещённые разрешения — через пробел.
+          FORBIDDEN_PERMISSIONS="android.permission.INTERNET android.permission.ACCESS_NETWORK_STATE"
+
+          APK="app/build/outputs/apk/debug/app-debug.apk"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          BUILD_TOOLS="$(ls -d "$SDK"/build-tools/*/ | sort -V | tail -n 1)"
+          AAPT2="${BUILD_TOOLS}aapt2"
+
+          echo "aapt2: $AAPT2"
+          echo "APK:   $APK"
+          test -f "$APK" || { echo "::error::APK не найден: $APK"; exit 1; }
+
+          DUMP="$("$AAPT2" dump permissions "$APK")"
+          echo "---- aapt2 dump permissions ----"
+          echo "$DUMP"
+          echo "--------------------------------"
+
+          USED="$(echo "$DUMP" | grep -E '^uses-permission(-sdk-23)?:' \
+                    | grep -oE "name='[^']+'" | sed -E "s/^name='(.*)'$/\1/" | sort -u || true)"
+
+          if [ -z "$USED" ]; then
+            echo "::error::Не удалось извлечь ни одного uses-permission из APK — проверьте разбор вывода aapt2."
+            exit 1
+          fi
+
+          FOUND=0
+          for p in $FORBIDDEN_PERMISSIONS; do
+            if echo "$USED" | grep -Fxq "$p"; then
+              echo "::error::Запрещённое разрешение в итоговом манифесте: $p"
+              FOUND=1
+            fi
+          done
+
+          if [ "$FOUND" -ne 0 ]; then
+            exit 1
+          fi
+          echo "OK: запрещённых разрешений нет."
+
+      - name: Prepare release files
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME}"
+          OUT="dist"
+          mkdir -p "$OUT"
+          APK_NAME="battery-logger-${TAG}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "$OUT/$APK_NAME"
+          (cd "$OUT" && sha256sum "$APK_NAME" > SHA256SUMS.txt)
+          cat "$OUT/SHA256SUMS.txt"
+          echo "apk=$OUT/$APK_NAME" >> "$GITHUB_OUTPUT"
+
+      # Подписанная аттестация: «этот файл собран этим workflow из этого коммита».
+      # Проверка: gh attestation verify <apk> --repo <owner>/<repo>
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.files.outputs.apk }}
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > notes.md <<EOF
+          Debug-сборка, собрана GitHub Actions из коммита ${GITHUB_SHA} (тег ${GITHUB_REF_NAME}).
+
+          Проверить, что APK собран из этого кода этим workflow:
+
+              gh attestation verify battery-logger-${GITHUB_REF_NAME}-debug.apk --repo ${GITHUB_REPOSITORY}
+
+          Контрольная сумма: см. SHA256SUMS.txt.
+          EOF
+          gh release create "${GITHUB_REF_NAME}" \
+            "${{ steps.files.outputs.apk }}" dist/SHA256SUMS.txt \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --verify-tag
